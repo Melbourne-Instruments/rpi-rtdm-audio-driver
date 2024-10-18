@@ -2,11 +2,11 @@
 /**
  *-----------------------------------------------------------------------------
  * @brief SPI module for the RTDM audio driver.
- * @copyright 2020-2021 Melbourne Instruments, Australia
+ * @copyright 2020-2023 Melbourne Instruments, Australia
  *-----------------------------------------------------------------------------
  */
-#ifndef BCM2835_SPI_NINA_H
-#define BCM2835_SPI_NINA_H
+#ifndef BCM2835_SPI_MELBINST_H
+#define BCM2835_SPI_MELBINST_H
 
 #include "audio-rtdm.h"
 
@@ -16,4 +16,4 @@ extern bool bcm2835_spi_transfer(void);
 extern void bcm2835_spi_close(void);
 extern int bcm2835_spi_exit(void);
 
-#endif	// BCM2835_SPI_NINA_H
+#endif	// BCM2835_SPI_MELBINST_H

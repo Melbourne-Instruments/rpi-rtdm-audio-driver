@@ -2,11 +2,13 @@
 /**
  *-----------------------------------------------------------------------------
  * @brief SPI module for the RTDM audio driver.
- *        This uses two SPI devices (SPI0 and SPI4) to transmit and receive
+ *        NINA: This uses two SPI devices (SPI0 and SPI4) to transmit and receive
  *        data to the NINA FPGAs.
+ *        DELIA: This uses a single SPI device (SPI0) to transmit and receive
+ *        data to the DELIA FPGA.
  *	      A lot of this code is based on the Xenomai SPI module by Philippe
  *        Gerum, and the standard linux Broadcom BCM2835 SPI module.
- * @copyright 2020-2022 Melbourne Instruments, Australia
+ * @copyright 2020-2024 Melbourne Instruments, Australia
  *-----------------------------------------------------------------------------
  */
 #include <linux/module.h>
@@ -25,17 +27,22 @@
 #include <linux/delay.h>
 #include <rtdm/driver.h>
 #include <rtdm/uapi/spi.h>
-#include "bcm2835-spi-nina.h"
+#include "bcm2835-spi-melbinst.h"
+#if MELBINST_HAT == 0
 #include "nina-pi-config.h"
-
+#elif MELBINST_HAT == 1
+#include "delia-pi-config.h"
+#else
+#error Unknown Melbourne Instruments RPi target device
+#endif
 
 /*-----------------------------------------------------------------------------
  * Constants
  *---------------------------------------------------------------------------*/
 
-/* Define to simulate the NINA Hat sample rate interrupt */
-#ifndef SIMULATE_NINA_HAT
-#define SIMULATE_NINA_HAT           0
+/* Define to simulate the Melbourne Instruments Hat sample rate interrupt */
+#ifndef SIMULATE_MELBINST_HAT
+#define SIMULATE_MELBINST_HAT       0
 #endif
 
 /* PACTL_CS register address */
@@ -83,20 +90,20 @@
 ** The SPI buffer consists of audio, and is double buffered
 ** Note: Page size is assumed to be 4096 bytes
 */
-#define SPI_OUTPUT_BUFFER_AUDIO_SAMPLES_SIZE        (NINA_PI_NUM_OUTPUT_CHANNELS_PER_FPGA * NINA_PI_BUFFER_SIZE * 24 / 8)
-#define SPI_INPUT_BUFFER_AUDIO_SAMPLES_SIZE         (NINA_PI_NUM_AUDIO_INPUT_CHANNELS * NINA_PI_BUFFER_SIZE) * 4
+#define SPI_OUTPUT_BUFFER_AUDIO_SAMPLES_SIZE        (MELBINST_PI_NUM_OUTPUT_CHANNELS_PER_FPGA * MELBINST_PI_BUFFER_SIZE * 24 / 8)
+#define SPI_INPUT_BUFFER_AUDIO_SAMPLES_SIZE         (MELBINST_PI_NUM_AUDIO_INPUT_CHANNELS * MELBINST_PI_BUFFER_SIZE) * 4
 #define SPI_OUTPUT_BUFFER_TRANSFER_SIZE             (SPI_OUTPUT_BUFFER_AUDIO_SAMPLES_SIZE + (2*4))
-#define SPI_INPUT_BUFFER_TRANSFER_SIZE              (SPI_INPUT_BUFFER_AUDIO_SAMPLES_SIZE + ((NINA_PI_NUM_FPGA_STATUS_REGS + 7) * 4))
+#define SPI_INPUT_BUFFER_TRANSFER_SIZE              (SPI_INPUT_BUFFER_AUDIO_SAMPLES_SIZE + ((MELBINST_PI_NUM_FPGA_STATUS_REGS + 7) * 4))
 #define SPI_BUFFER_TRANSFER_SIZE                    SPI_OUTPUT_BUFFER_TRANSFER_SIZE
 #define SPI_BUFFER_TRANSFER_SIZE_IN_PAGES           2
-#define RESERVED_SPI_BUFFER_SIZE_IN_PAGES           (SPI_BUFFER_TRANSFER_SIZE_IN_PAGES * 4 * 2)
+#define RESERVED_SPI_BUFFER_SIZE_IN_PAGES           (SPI_BUFFER_TRANSFER_SIZE_IN_PAGES * 4 * MELBINST_NUM_FPGAS)
 
 /* GPIO lines used for the FPGA interrupt/reset */
 #define FPGA_INTERRUPT_GPIO             18
 #define FPGA_RESET_GPIO                 24
 
 /* GPO line used to simulate the FPGA interrupt */
-#if SIMULATE_NINA_HAT == 1
+#if SIMULATE_MELBINST_HAT == 1
 #define SIMULATE_FPGA_INTERUPT_GPIO     17
 #endif
 
@@ -125,7 +132,7 @@ static int bcm2835_dma_init(void);
 static void bcm2835_dma_release(void);                      
 static int fpga_irq_handler(rtdm_irq_t *irq_handle);
 
-#if SIMULATE_NINA_HAT == 1
+#if SIMULATE_MELBINST_HAT == 1
 static void simulate_fpga_sample_rate(rtdm_timer_t *timer);
 #endif
 
@@ -136,7 +143,7 @@ static void simulate_fpga_sample_rate(rtdm_timer_t *timer);
 
 static struct audio_rtdm_dev *audio_static_dev;
 static rtdm_irq_t rtdm_fpga_irq;
-#if SIMULATE_NINA_HAT == 1
+#if SIMULATE_MELBINST_HAT == 1
 static rtdm_timer_t rtdm_fpga_timer;
 #endif
 
@@ -361,7 +368,9 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 {
     struct resource *res;
     struct audio_rtdm_dev *audio_dev = audio_static_dev;
+#if MELBINST_HAT == 0
     void __iomem *regs;
+#endif
     const __be32 *addr;
     int len;
     int ret;
@@ -412,6 +421,7 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
         bcm2835_wr(audio_dev->spi0_dev.base_addr, BCM2835_SPI_CS,
                    BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
     }
+#if MELBINST_HAT == 0
     /* Is this SPI4? */
     else if (of_find_property(pdev->dev.of_node, "id-spi4", &len))
     {
@@ -455,6 +465,7 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
         bcm2835_wr(audio_dev->spi4_dev.base_addr, BCM2835_SPI_CS,
                    BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);     
     }
+#endif
     else
     {
         /* Unknown SPI device */
@@ -476,13 +487,17 @@ static int bcm2835_spi_remove(struct platform_device *pdev)
     /* Clear FIFOs, and disable the HW block */
     bcm2835_wr(audio_dev->spi0_dev.base_addr, BCM2835_SPI_CS,
                BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
+#if MELBINST_HAT == 0
     bcm2835_wr(audio_dev->spi4_dev.base_addr, BCM2835_SPI_CS,
                BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
+#endif
 
     /* Free the RTDM interrupt and disable the clock */
     rtdm_irq_free(&rtdm_fpga_irq);
     clk_disable_unprepare(audio_dev->spi0_dev.clk);
+#if MELBINST_HAT == 0    
     clk_disable_unprepare(audio_dev->spi4_dev.clk);
+#endif
     return 0;
 }
 
@@ -564,7 +579,7 @@ static int bcm2835_gpio_init(struct device *dev)
         return ret;
     }
 
-#if SIMULATE_NINA_HAT == 1
+#if SIMULATE_MELBINST_HAT == 1
     /* Initialise the GPIO line used to simulate the FPGA interrupt */
     ret = gpio_request(SIMULATE_FPGA_INTERUPT_GPIO, "Simulate_FPGA_IRQ");
     if (ret) {
@@ -587,7 +602,9 @@ static int bcm2835_dma_init()
 
     /* Initialise the DMA for each SPI */
     bcm2835_spi_dma_init(&audio_dev->spi0_dev);
+#if MELBINST_HAT == 0
     bcm2835_spi_dma_init(&audio_dev->spi4_dev);
+#endif
 
     /* Prepare the SPI slave transfer 0 */
     audio_dev->spi0_dev.tx0_desc = bcm2835_spi_prep_slave(&audio_dev->spi0_dev, 
@@ -600,6 +617,7 @@ static int bcm2835_dma_init()
         return -EINVAL;
     }
     dma_phys_addr += SPI_BUFFER_TRANSFER_SIZE;
+#if MELBINST_HAT == 0
     audio_dev->spi4_dev.tx0_desc = bcm2835_spi_prep_slave(&audio_dev->spi4_dev, 
                                 dma_phys_addr, 
                                 SPI_BUFFER_TRANSFER_SIZE,
@@ -609,7 +627,8 @@ static int bcm2835_dma_init()
                 "dma: bcm2835_spi_prep_slave tx0\n");
         return -EINVAL;
     }
-    dma_phys_addr += SPI_BUFFER_TRANSFER_SIZE;        
+    dma_phys_addr += SPI_BUFFER_TRANSFER_SIZE;
+#endif
     audio_dev->spi0_dev.rx0_desc = bcm2835_spi_prep_slave(&audio_dev->spi0_dev, 
                                 dma_phys_addr,
                                 SPI_BUFFER_TRANSFER_SIZE,
@@ -620,6 +639,7 @@ static int bcm2835_dma_init()
         return -EINVAL;
     }
     dma_phys_addr += SPI_BUFFER_TRANSFER_SIZE;
+#if MELBINST_HAT == 0
     audio_dev->spi4_dev.rx0_desc = bcm2835_spi_prep_slave(&audio_dev->spi4_dev, 
                                 dma_phys_addr,
                                 SPI_BUFFER_TRANSFER_SIZE,
@@ -630,6 +650,7 @@ static int bcm2835_dma_init()
         return -EINVAL;
     }
     dma_phys_addr += SPI_BUFFER_TRANSFER_SIZE;
+#endif
 
     /* Prepare the SPI slave transfer 1 */
     audio_dev->spi0_dev.tx1_desc = bcm2835_spi_prep_slave(&audio_dev->spi0_dev, 
@@ -642,6 +663,7 @@ static int bcm2835_dma_init()
         return -EINVAL;
     }
     dma_phys_addr += SPI_BUFFER_TRANSFER_SIZE;
+#if MELBINST_HAT == 0
     audio_dev->spi4_dev.tx1_desc = bcm2835_spi_prep_slave(&audio_dev->spi4_dev, 
                                 dma_phys_addr, 
                                 SPI_BUFFER_TRANSFER_SIZE,
@@ -651,7 +673,8 @@ static int bcm2835_dma_init()
                 "dma: bcm2835_spi_prep_slave tx1\n");
         return -EINVAL;
     }
-    dma_phys_addr += SPI_BUFFER_TRANSFER_SIZE;                 
+    dma_phys_addr += SPI_BUFFER_TRANSFER_SIZE;
+#endif            
     audio_dev->spi0_dev.rx1_desc = bcm2835_spi_prep_slave(&audio_dev->spi0_dev, 
                                 dma_phys_addr,
                                 SPI_BUFFER_TRANSFER_SIZE,
@@ -661,6 +684,7 @@ static int bcm2835_dma_init()
                 "dma: bcm2835_spi_prep_slave rx1\n");
         return -EINVAL;
     }
+#if MELBINST_HAT == 0
     dma_phys_addr += SPI_BUFFER_TRANSFER_SIZE;        
     audio_dev->spi4_dev.rx1_desc = bcm2835_spi_prep_slave(&audio_dev->spi4_dev, 
                                 dma_phys_addr,
@@ -671,6 +695,7 @@ static int bcm2835_dma_init()
                 "dma: bcm2835_spi_prep_slave rx1\n");
         return -EINVAL;
     }
+#endif
     return 0;
 }
 
@@ -680,7 +705,9 @@ static void bcm2835_dma_release(void)
 
     /* Release the DMA channels */
     bcm2835_spi_dma_release(&audio_dev->spi0_dev);
+#if MELBINST_HAT == 0    
     bcm2835_spi_dma_release(&audio_dev->spi4_dev);
+#endif
 }
 
 static int fpga_irq_handler(rtdm_irq_t *irq_handle)
@@ -697,7 +724,7 @@ static int fpga_irq_handler(rtdm_irq_t *irq_handle)
     return RTDM_IRQ_HANDLED;
 }
 
-#if SIMULATE_NINA_HAT == 1
+#if SIMULATE_MELBINST_HAT == 1
 static void simulate_fpga_sample_rate(rtdm_timer_t *timer) {
     // The simulate FPGA GPIO line is used to generate an interrupt
     // on the actual FPGA GPIO interrupt line
@@ -756,17 +783,19 @@ int bcm2835_spi_init(int audio_buffer_size, int audio_channels, char *audio_hat)
         config.bits_per_word = 8;
         config.speed_hz = 62500000;
         bcm2835_spi_configure(&config, &audio_dev->spi0_dev);
+#if MELBINST_HAT == 0
         bcm2835_spi_configure(&config, &audio_dev->spi4_dev);
+#endif
 
-#if SIMULATE_NINA_HAT == 1
+#if SIMULATE_MELBINST_HAT == 1
         /* Create the sample rate timer, used to generate an interrupt using GPIO */
         rtdm_timer_init(&rtdm_fpga_timer, simulate_fpga_sample_rate, "simulate_fpga_sample_rate");
-        rtdm_timer_start(&rtdm_fpga_timer, 1000000000, (1000000000 / (NINA_PI_SAMPLING_RATE / NINA_PI_BUFFER_SIZE)), RTDM_TIMERMODE_REALTIME);
-        rtdm_printk(KERN_ERR "bcm2835-spi: SIMULATE_NINA_HAT\n");
+        rtdm_timer_start(&rtdm_fpga_timer, 1000000000, (1000000000 / (MELBINST_PI_SAMPLING_RATE / MELBINST_PI_BUFFER_SIZE)), RTDM_TIMERMODE_REALTIME);
+        rtdm_printk(KERN_ERR "bcm2835-spi: SIMULATE_MELBINST_HAT\n");
 #endif
     }
     else {
-        // Ensure the DMA memory is zero'd on initialisation, even if already allocated
+        // Ensure the DMA memory is zeroed on initialisation, even if already allocated
         memset(audio_dev->spi_buf, 0, RESERVED_SPI_BUFFER_SIZE_IN_PAGES * PAGE_SIZE);
     }
 	return 0;
@@ -779,7 +808,9 @@ struct audio_rtdm_dev *bcm2835_spi_open(void)
 
     /* Reset fifo and HW */
     bcm2835_spi_reset_hw(audio_dev->spi0_dev.base_addr);
+#if MELBINST_HAT == 0
     bcm2835_spi_reset_hw(audio_dev->spi4_dev.base_addr);
+#endif
 
     // Ensure the DMA memory is zero'd on initialisation, even if already allocated
     memset(audio_dev->spi_buf, 0, RESERVED_SPI_BUFFER_SIZE_IN_PAGES * PAGE_SIZE);
@@ -813,14 +844,20 @@ bool bcm2835_spi_transfer()
      ** Check both previous transfers were OK
      ** If not, do not initiate the next transfer
      */
+#if MELBINST_HAT == 0    
     if (!bcm2835_spi_dma_check_last_transfer(&audio_dev->spi0_dev) ||
         !bcm2835_spi_dma_check_last_transfer(&audio_dev->spi4_dev)) {
+#else
+    if (!bcm2835_spi_dma_check_last_transfer(&audio_dev->spi0_dev)) {
+#endif
         return false;
     }
 
     /* Start the SPI DMA transfers */
     bcm2835_spi_dma_transfer(&audio_dev->spi0_dev);
+#if MELBINST_HAT == 0    
     bcm2835_spi_dma_transfer(&audio_dev->spi4_dev);
+#endif
     return true;
 }
 EXPORT_SYMBOL_GPL(bcm2835_spi_transfer);
@@ -845,7 +882,7 @@ int bcm2835_spi_exit(void)
                       audio_dev->spi_buf,
                       audio_dev->spi_dma_addr);
 
-#if SIMULATE_NINA_HAT == 1
+#if SIMULATE_MELBINST_HAT == 1
     /* Stop and destroy the FPGA timer */
 	rtdm_timer_stop(&rtdm_fpga_timer);
 	rtdm_timer_destroy(&rtdm_fpga_timer);
@@ -862,7 +899,7 @@ MODULE_DEVICE_TABLE(of, bcm2835_spi_match);
 
 static struct platform_driver bcm2835_spi_driver = {
     .driver = {
-        .name           = "bcm2835-spi-nina",
+        .name           = "bcm2835-spi-melbinst",
         .of_match_table	= bcm2835_spi_match,
     },
     .probe  = bcm2835_spi_probe,
@@ -870,6 +907,10 @@ static struct platform_driver bcm2835_spi_driver = {
 };
 
 module_platform_driver(bcm2835_spi_driver);
+#if MELBINST_HAT == 0
 MODULE_DESCRIPTION("BCM2835 SPI interface for NINA RPi");
+#else
+MODULE_DESCRIPTION("BCM2835 SPI interface for DELIA RPi");
+#endif
 MODULE_AUTHOR("Melbourne Instruments");
 MODULE_LICENSE("GPL");

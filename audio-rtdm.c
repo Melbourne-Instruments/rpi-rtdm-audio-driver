@@ -2,7 +2,7 @@
 /**
  *-----------------------------------------------------------------------------
  * @brief Based on the Audio RTDM driver by ELK, updated to use the SPI.
- * @copyright 2020-2022 Melbourne Instruments, Australia
+ * @copyright 2020-2024 Melbourne Instruments, Australia
  *-----------------------------------------------------------------------------
  */
 #include <linux/module.h>
@@ -17,20 +17,35 @@
 #include <rtdm/driver.h>
 #include <rtdm/rtdm.h>
 #include "audio-rtdm.h"
-#include "bcm2835-spi-nina.h"
+#include "bcm2835-spi-melbinst.h"
+#if MELBINST_HAT == 0
 #include "nina-pi-config.h"
+#elif MELBINST_HAT == 1
+#include "delia-pi-config.h"
+#else
+#error Unknown Melbourne Instruments RPi target device
+#endif
+
+// Number of pages to map
+#define TRANSFER_SIZE_IN_PAGES         	2
+#define RESERVED_BUFFER_SIZE_IN_PAGES	(TRANSFER_SIZE_IN_PAGES * 4 * MELBINST_NUM_FPGAS)
+
 
 MODULE_AUTHOR("Melbourne Instruments");
+#if MELBINST_HAT == 0
 MODULE_DESCRIPTION("RTDM audio driver for NINA RPi");
+#else
+MODULE_DESCRIPTION("RTDM audio driver for DELIA RPi");
+#endif
 MODULE_LICENSE("GPL");
 
-#define DEFAULT_AUDIO_SAMPLING_RATE			48000
+#define DEFAULT_AUDIO_SAMPLING_RATE				48000
 #define DEFAULT_AUDIO_NUM_INPUT_CHANNELS		8
 #define DEFAULT_AUDIO_NUM_OUTPUT_CHANNELS		8
 #define DEFAULT_AUDIO_NUM_CODEC_CHANNELS		8
 #define DEFAULT_AUDIO_N_FRAMES_PER_BUFFER		128
-#define DEFAULT_AUDIO_CODEC_FORMAT			INT24_LJ
-#define NUM_INITIAL_BUFFER_SKIPS			1515	// ~1s @ 660us per buffer
+#define DEFAULT_AUDIO_CODEC_FORMAT				INT24_LJ
+#define NUM_INITIAL_BUFFER_SKIPS				1515	// ~1s @ 660us per buffer
 
 static uint audio_ver_maj = AUDIO_RTDM_VERSION_MAJ;
 module_param(audio_ver_maj, uint, 0644);
@@ -56,7 +71,11 @@ module_param(audio_sampling_rate, uint, 0444);
 static uint audio_format = DEFAULT_AUDIO_CODEC_FORMAT;
 module_param(audio_format, uint, 0444);
 
+#if MELBINST_HAT == 0
 static char *audio_hat = "nina-pi";
+#else
+static char *audio_hat = "delia-pi";
+#endif
 module_param(audio_hat, charp, 0660);
 
 struct audio_dev_context {
@@ -108,7 +127,7 @@ static int audio_driver_mmap_nrt(struct rtdm_fd *fd, struct vm_area_struct *vma)
 	return dma_mmap_coherent(dev_context->rtdm_dev->spi0_dev.dev,
 		vma,
 		dev_context->rtdm_dev->spi_buf, dev_context->rtdm_dev->spi_dma_addr,
-		16 * PAGE_SIZE);
+		RESERVED_BUFFER_SIZE_IN_PAGES * PAGE_SIZE);
 }
 
 static int audio_driver_ioctl_rt(struct rtdm_fd *fd, unsigned int request,
@@ -213,26 +232,30 @@ int audio_rtdm_init(void)
 	int ret, num_codec_channels = DEFAULT_AUDIO_NUM_CODEC_CHANNELS;
 
 	if (!realtime_core_enabled()) {
-		rtdm_printk(KERN_ERR "audio_rtdm: rt core not enabled\n");
+		rtdm_printk(KERN_ERR "audio_rtdm: RT core not enabled\n");
 		return -ENODEV;
 	}
 	msleep(100);
 	rtdm_printk(KERN_INFO "audio_rtdm: SPI audio interface\n");
 	if (!strcmp(audio_hat, "nina-pi")) {
 		rtdm_printk(KERN_INFO "audio_rtdm: nina-pi hat\n");
-		audio_input_channels = NINA_PI_NUM_INPUT_CHANNELS;
-		audio_output_channels = NINA_PI_NUM_OUTPUT_CHANNELS;
-		num_codec_channels = NINA_PI_NUM_CODEC_CHANNELS;
-		audio_sampling_rate = NINA_PI_SAMPLING_RATE;
-        audio_buffer_size = NINA_PI_BUFFER_SIZE;
-		msleep(100);
-		if (bcm2835_spi_init(audio_buffer_size, num_codec_channels, audio_hat)) {
-			rtdm_printk(KERN_ERR "audio_rtdm: SPI init failed\n");
-			return -1;
-		}
+	}
+	else if (!strcmp(audio_hat, "delia-pi")) {
+		rtdm_printk(KERN_INFO "audio_rtdm: delia-pi hat\n");
 	}
 	else {
 		rtdm_printk(KERN_ERR "audio_rtdm: Unsupported hat\n");
+		return -1;
+	}
+	audio_input_channels = MELBINST_PI_NUM_INPUT_CHANNELS;
+	audio_output_channels = MELBINST_PI_NUM_OUTPUT_CHANNELS;
+	num_codec_channels = MELBINST_PI_NUM_CODEC_CHANNELS;
+	audio_sampling_rate = MELBINST_PI_SAMPLING_RATE;
+	audio_buffer_size = MELBINST_PI_BUFFER_SIZE;
+	msleep(100);
+	if (bcm2835_spi_init(audio_buffer_size, num_codec_channels, audio_hat)) {
+		rtdm_printk(KERN_ERR "audio_rtdm: SPI init failed\n");
+		return -1;
 	}
 	ret = rtdm_dev_register(&rtdm_audio_device);
 	if (ret) {

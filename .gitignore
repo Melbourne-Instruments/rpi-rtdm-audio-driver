@@ -1,13 +1,14 @@
 
 *.ko
 *.mod.c
+*.mod
 *.o
 *.o.d
 .vscode*
 *.cmd
 *.ko.cmd
 *.tmp_versions
+*.a
 Module.symvers
 modules.order
 spi_test/spi_test
-audio_control_test/audio_control_test
